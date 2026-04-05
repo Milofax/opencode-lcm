@@ -787,7 +787,6 @@ async function openSqliteDatabase(dbPath: string): Promise<SqlDatabaseLike> {
 }
 
 export class SqliteLcmStore {
-  private static readonly deferredPartUpdateDelayMs = 250;
   private readonly baseDir: string;
   private readonly dbPath: string;
   private readonly privacy: CompiledPrivacyOptions;
@@ -846,7 +845,7 @@ export class SqliteLcmStore {
     this.pendingPartUpdateTimer = setTimeout(() => {
       this.pendingPartUpdateTimer = undefined;
       void this.flushDeferredPartUpdates();
-    }, SqliteLcmStore.deferredPartUpdateDelayMs);
+    }, this.options.deferredPartUpdateDelayMs);
     unrefTimer(this.pendingPartUpdateTimer);
   }
 
