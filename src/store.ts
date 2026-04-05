@@ -357,7 +357,20 @@ function getDeferredPartUpdateKey(event: Event): string | undefined {
 }
 
 function compareMessages(a: ConversationMessage, b: ConversationMessage): number {
-  return a.info.time.created - b.info.time.created;
+  return messageCreatedAt(a) - messageCreatedAt(b);
+}
+
+function messageCreatedAt(message: ConversationMessage | undefined): number {
+  const created = message?.info?.time?.created;
+  return typeof created === 'number' && Number.isFinite(created) ? created : 0;
+}
+
+function messageParts(message: ConversationMessage | undefined): Part[] {
+  return Array.isArray(message?.parts) ? message.parts : [];
+}
+
+function signatureString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value : fallback;
 }
 
 function emptySession(sessionID: string): NormalizedSession {
@@ -435,19 +448,21 @@ function isSyntheticLcmTextPart(part: Part, markers?: string[]): boolean {
 function guessMessageText(message: ConversationMessage, ignoreToolPrefixes: string[]): string {
   const segments: string[] = [];
 
-  for (const part of message.parts) {
+  for (const part of messageParts(message)) {
     switch (part.type) {
       case 'text': {
         if (isSyntheticLcmTextPart(part, ['archive-summary', 'retrieved-context', 'archived-part']))
           break;
-        if (part.text.startsWith('[Archived by opencode-lcm:')) break;
-        const sanitized = sanitizeAutomaticRetrievalSourceText(part.text);
+        const text = typeof part.text === 'string' ? part.text : '';
+        if (text.startsWith('[Archived by opencode-lcm:')) break;
+        const sanitized = sanitizeAutomaticRetrievalSourceText(text);
         if (sanitized) segments.push(sanitized);
         break;
       }
       case 'reasoning': {
-        if (part.text.startsWith('[Archived by opencode-lcm:')) break;
-        const sanitized = sanitizeAutomaticRetrievalSourceText(part.text);
+        const text = typeof part.text === 'string' ? part.text : '';
+        if (text.startsWith('[Archived by opencode-lcm:')) break;
+        const sanitized = sanitizeAutomaticRetrievalSourceText(text);
         if (sanitized) segments.push(sanitized);
         break;
       }
@@ -496,7 +511,7 @@ function guessMessageText(message: ConversationMessage, ignoreToolPrefixes: stri
 function listFiles(message: ConversationMessage): string[] {
   const files = new Set<string>();
 
-  for (const part of message.parts) {
+  for (const part of messageParts(message)) {
     if (part.type === 'file') {
       if (part.source?.path) files.add(part.source.path);
       else if (part.filename) files.add(part.filename);
@@ -1528,7 +1543,7 @@ export class SqliteLcmStore {
       return issues.length > 0 ? { sessionID: session.sessionID, issues } : undefined;
     }
 
-    const latestMessageCreated = archived.at(-1)?.info.time.created ?? 0;
+    const latestMessageCreated = messageCreatedAt(archived.at(-1));
     const archivedSignature = this.buildArchivedSignature(archived);
     const rootIDs = state ? parseJson<string[]>(state.root_node_ids_json) : [];
     const roots = rootIDs
@@ -3378,7 +3393,7 @@ export class SqliteLcmStore {
   private listTools(messages: ConversationMessage[]): string[] {
     const tools: string[] = [];
     for (const message of messages) {
-      for (const part of message.parts) {
+      for (const part of messageParts(message)) {
         if (part.type !== 'tool') continue;
         if (this.shouldIgnoreTool(part.tool)) continue;
         tools.push(part.tool);
@@ -3390,13 +3405,13 @@ export class SqliteLcmStore {
   private buildArchivedSignature(messages: ConversationMessage[]): string {
     const hash = createHash('sha256');
     for (const message of messages) {
-      hash.update(message.info.id);
-      hash.update(message.info.role);
-      hash.update(String(message.info.time.created));
+      hash.update(signatureString(message.info?.id, 'unknown-message'));
+      hash.update(signatureString(message.info?.role, 'unknown-role'));
+      hash.update(String(messageCreatedAt(message)));
       hash.update(guessMessageText(message, this.options.interop.ignoreToolPrefixes));
-      hash.update(JSON.stringify(listFiles(message)));
-      hash.update(JSON.stringify(this.listTools([message])));
-      hash.update(String(message.parts.length));
+      hash.update(JSON.stringify(listFiles(message)) ?? '[]');
+      hash.update(JSON.stringify(this.listTools([message])) ?? '[]');
+      hash.update(String(messageParts(message).length));
     }
     return hash.digest('hex');
   }
@@ -3423,7 +3438,7 @@ export class SqliteLcmStore {
       return [];
     }
 
-    const latestMessageCreated = archivedMessages.at(-1)?.info.time.created ?? 0;
+    const latestMessageCreated = messageCreatedAt(archivedMessages.at(-1));
     const archivedSignature = this.buildArchivedSignature(archivedMessages);
     const state = safeQueryOne<SummaryStateRow>(
       this.getDb().prepare('SELECT * FROM summary_state WHERE session_id = ?'),
@@ -3663,7 +3678,7 @@ export class SqliteLcmStore {
       ).run(
         sessionID,
         archivedMessages.length,
-        archivedMessages.at(-1)?.info.time.created ?? 0,
+        messageCreatedAt(archivedMessages.at(-1)),
         archivedSignature,
         JSON.stringify(roots.map((node) => node.nodeID)),
         now,

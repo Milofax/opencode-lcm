@@ -61,6 +61,123 @@ test('transformMessages is a no-op below the configured threshold', async () => 
   }
 });
 
+test('transformMessages tolerates legacy archived messages without created timestamps', async () => {
+  const workspace = makeWorkspace('lcm-transform-legacy-message-time');
+  let store;
+
+  try {
+    store = new SqliteLcmStore(
+      workspace,
+      makeOptions({
+        freshTailMessages: 1,
+        minMessagesForTransform: 4,
+        automaticRetrieval: { enabled: false },
+      }),
+    );
+    await store.init();
+    await createSession(store, workspace, 's1', 1);
+
+    const messages = [
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm1',
+        created: 1,
+        parts: [textPart('s1', 'm1', 'm1-p', 'legacy archived alpha')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm2',
+        created: 2,
+        parts: [textPart('s1', 'm2', 'm2-p', 'legacy archived beta')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm3',
+        created: 3,
+        parts: [textPart('s1', 'm3', 'm3-p', 'legacy archived gamma')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm4',
+        created: 4,
+        parts: [textPart('s1', 'm4', 'm4-p', 'fresh tail prompt')],
+      }),
+    ];
+    delete messages[2].info.time;
+
+    const changed = await store.transformMessages(messages);
+    const summaryPart = messages[3].parts.find(
+      (part) => part.metadata?.opencodeLcm === 'archive-summary',
+    );
+
+    assert.equal(changed, true);
+    assert.ok(summaryPart);
+    assert.match(summaryPart.text, /legacy archived alpha/);
+  } finally {
+    store?.close();
+    await cleanupWorkspace(workspace);
+  }
+});
+
+test('transformMessages tolerates legacy archived messages with missing id and parts text', async () => {
+  const workspace = makeWorkspace('lcm-transform-legacy-signature-fields');
+  let store;
+
+  try {
+    store = new SqliteLcmStore(
+      workspace,
+      makeOptions({
+        freshTailMessages: 1,
+        minMessagesForTransform: 4,
+        automaticRetrieval: { enabled: false },
+      }),
+    );
+    await store.init();
+    await createSession(store, workspace, 's1', 1);
+
+    const messages = [
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm1',
+        created: 1,
+        parts: [textPart('s1', 'm1', 'm1-p', 'legacy archived alpha')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm2',
+        created: 2,
+        parts: [textPart('s1', 'm2', 'm2-p', 'legacy archived beta')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm3',
+        created: 3,
+        parts: [textPart('s1', 'm3', 'm3-p', 'legacy archived gamma')],
+      }),
+      conversationMessage({
+        sessionID: 's1',
+        messageID: 'm4',
+        created: 4,
+        parts: [textPart('s1', 'm4', 'm4-p', 'fresh tail prompt')],
+      }),
+    ];
+    delete messages[1].info.id;
+    messages[2].parts[0].text = undefined;
+
+    const changed = await store.transformMessages(messages);
+    const summaryPart = messages[3].parts.find(
+      (part) => part.metadata?.opencodeLcm === 'archive-summary',
+    );
+
+    assert.equal(changed, true);
+    assert.ok(summaryPart);
+    assert.match(summaryPart.text, /legacy archived alpha/);
+  } finally {
+    store?.close();
+    await cleanupWorkspace(workspace);
+  }
+});
+
 test('transformMessages automatically injects relevant archived memory snippets', async () => {
   const workspace = makeWorkspace('lcm-auto-retrieval');
   let store;
