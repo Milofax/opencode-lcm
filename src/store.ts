@@ -3405,13 +3405,13 @@ export class SqliteLcmStore {
   private buildArchivedSignature(messages: ConversationMessage[]): string {
     const hash = createHash('sha256');
     for (const message of messages) {
-      hash.update(signatureString(message.info?.id, 'unknown-message'));
-      hash.update(signatureString(message.info?.role, 'unknown-role'));
-      hash.update(String(messageCreatedAt(message)));
-      hash.update(guessMessageText(message, this.options.interop.ignoreToolPrefixes));
-      hash.update(JSON.stringify(listFiles(message)) ?? '[]');
-      hash.update(JSON.stringify(this.listTools([message])) ?? '[]');
-      hash.update(String(messageParts(message).length));
+      hash.update(String(signatureString(message.info?.id, 'unknown-message') ?? 'unknown-message'));
+      hash.update(String(signatureString(message.info?.role, 'unknown-role') ?? 'unknown-role'));
+      hash.update(String(messageCreatedAt(message) ?? 0));
+      hash.update(String(guessMessageText(message, this.options.interop.ignoreToolPrefixes) ?? ''));
+      hash.update(String(JSON.stringify(listFiles(message)) ?? '[]'));
+      hash.update(String(JSON.stringify(this.listTools([message])) ?? '[]'));
+      hash.update(String(messageParts(message)?.length ?? 0));
     }
     return hash.digest('hex');
   }
