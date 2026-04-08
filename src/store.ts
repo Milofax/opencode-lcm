@@ -21,6 +21,7 @@ import {
   SUMMARY_NODE_CHAR_LIMIT,
 } from './constants.js';
 import { type DoctorReport, type DoctorSessionIssue, formatDoctorReport } from './doctor.js';
+import { CLIExitError as CLIError, invokeCLI } from './invoke-cli.js';
 import { getLogger, isStartupLoggingEnabled } from './logging.js';
 import {
   type CompiledPrivacyOptions,
@@ -72,6 +73,7 @@ import type {
   ScopeName,
   SearchResult,
   StoreStats,
+  SummaryStrategyName,
 } from './types.js';
 import {
   asRecord,
@@ -101,6 +103,7 @@ type SummaryNodeData = {
   endIndex: number;
   messageIDs: string[];
   summaryText: string;
+  strategy: SummaryStrategyName;
   createdAt: number;
 };
 
@@ -723,6 +726,7 @@ export class SqliteLcmStore {
   private db?: SqlDatabaseLike;
   private dbReadyPromise?: Promise<void>;
   private readonly pendingPartUpdates = new Map<string, Event>();
+  private summaryEnhancementLocks = new Map<string, Promise<void>>();
   private pendingPartUpdateTimer?: ReturnType<typeof setTimeout>;
   private pendingPartUpdateFlushPromise?: Promise<void>;
 
@@ -967,6 +971,7 @@ export class SqliteLcmStore {
         end_index INTEGER NOT NULL,
         message_ids_json TEXT NOT NULL,
         summary_text TEXT NOT NULL,
+        strategy TEXT NOT NULL DEFAULT 'deterministic-v1',
         created_at INTEGER NOT NULL,
         FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE
       );
@@ -1023,6 +1028,7 @@ export class SqliteLcmStore {
 
       this.ensureSessionColumnsSync();
       this.ensureSummaryStateColumnsSync();
+      this.ensureSummaryNodeColumnsSync();
       this.ensureArtifactColumnsSync();
       logStartupPhase('open-db:create-indexes');
       db.exec('CREATE INDEX IF NOT EXISTS idx_artifacts_content_hash ON artifacts(content_hash)');
@@ -1420,6 +1426,7 @@ export class SqliteLcmStore {
 
     this.ensureSessionColumnsSync();
     this.ensureSummaryStateColumnsSync();
+    this.ensureSummaryNodeColumnsSync();
     this.ensureArtifactColumnsSync();
     appliedActions.push('ensured schema columns');
 
@@ -3362,6 +3369,88 @@ export class SqliteLcmStore {
     messages: ConversationMessage[],
     limit = SUMMARY_NODE_CHAR_LIMIT,
   ): string {
+    const strategy = this.options.summaryV2?.strategy ?? 'deterministic-v1';
+    switch (strategy) {
+      case 'llm-cli':
+      case 'deterministic-v2':
+        return this.summarizeMessagesDeterministicV2(messages, limit);
+      case 'deterministic-v1':
+      default:
+        return this.summarizeMessagesDeterministicV1(messages, limit);
+    }
+  }
+
+  private async summarizeMessagesWithLLM(
+    messages: ConversationMessage[],
+    limit = SUMMARY_NODE_CHAR_LIMIT,
+  ): Promise<string> {
+    const fallback = (): string => this.summarizeMessagesDeterministicV2(messages, limit);
+    if (!this.options.llmCli.enabled) return fallback();
+
+    const separator = '\n---\n';
+    const cleanSummaryText = (value: string): string =>
+      value
+        .split('')
+        .map((char) => {
+          const code = char.charCodeAt(0);
+          return (code >= 0 && code < 32) || code === 127 ? ' ' : char;
+        })
+        .join('')
+        .trim();
+    const renderedMessages = messages.map((message) => {
+      const text = cleanSummaryText(
+        guessMessageText(message, this.options.interop.ignoreToolPrefixes),
+      );
+      return `${message.info.role}: ${text}`;
+    });
+
+    const selectedEntries: string[] = [];
+    let chunkLength = 0;
+    for (let index = renderedMessages.length - 1; index >= 0; index -= 1) {
+      const entry = renderedMessages[index];
+      const nextLength =
+        chunkLength + entry.length + (selectedEntries.length > 0 ? separator.length : 0);
+      if (selectedEntries.length > 0 && nextLength > this.options.llmCli.maxPromptChars) continue;
+      if (selectedEntries.length === 0 && entry.length > this.options.llmCli.maxPromptChars) {
+        selectedEntries.unshift(truncate(entry, this.options.llmCli.maxPromptChars));
+        chunkLength = selectedEntries[0]?.length ?? 0;
+        break;
+      }
+      selectedEntries.unshift(entry);
+      chunkLength = nextLength;
+    }
+
+    const chunkContent = truncate(
+      selectedEntries.join(separator),
+      this.options.llmCli.maxPromptChars,
+    );
+    const prompt = `Compress this conversation chunk into at most ${limit} characters. Focus on: decisions made, file paths touched, tools used, errors encountered, final outcomes. Output ONLY the compressed summary, no preamble, no explanation, no markdown.\n\nCHUNK:\n${chunkContent}`;
+
+    try {
+      const args = this.options.llmCli.args.map((arg) =>
+        arg.replaceAll('{{MODEL}}', this.options.llmCli.model),
+      );
+      const output = await invokeCLI({
+        command: this.options.llmCli.command,
+        args: this.options.llmCli.promptMode === 'arg' ? [...args, prompt] : args,
+        stdin: this.options.llmCli.promptMode === 'stdin' ? prompt : undefined,
+        timeoutMs: this.options.llmCli.timeoutMs,
+        maxOutputChars: Math.max(limit * 2, limit),
+      });
+      const cleaned = cleanSummaryText(output);
+      return truncate(cleaned, limit);
+    } catch (error) {
+      const message =
+        error instanceof CLIError || error instanceof Error ? error.message : String(error);
+      console.warn('[opencode-lcm] LLM summarization failed, falling back:', message);
+      return fallback();
+    }
+  }
+
+  private summarizeMessagesDeterministicV1(
+    messages: ConversationMessage[],
+    limit = SUMMARY_NODE_CHAR_LIMIT,
+  ): string {
     const goals = messages
       .filter((message) => message.info.role === 'user')
       .map((message) => guessMessageText(message, this.options.interop.ignoreToolPrefixes))
@@ -3390,6 +3479,86 @@ export class SqliteLcmStore {
     return truncate(segments.join(' || '), limit);
   }
 
+  private summarizeMessagesDeterministicV2(
+    messages: ConversationMessage[],
+    limit = SUMMARY_NODE_CHAR_LIMIT,
+  ): string {
+    const perMsgBudget = this.options.summaryV2?.perMessageBudget ?? 110;
+    const ignoreToolPrefixes = this.options.interop.ignoreToolPrefixes;
+
+    // Extract all user and assistant message texts
+    const userTexts = messages
+      .filter((m) => m.info.role === 'user')
+      .map((m) => guessMessageText(m, ignoreToolPrefixes))
+      .filter(Boolean);
+
+    const assistantTexts = messages
+      .filter((m) => m.info.role === 'assistant')
+      .map((m) => guessMessageText(m, ignoreToolPrefixes))
+      .filter(Boolean);
+
+    const allFiles = [...new Set(messages.flatMap(listFiles))];
+    const allTools = [...new Set(this.listTools(messages))];
+
+    // Detect errors in tool results or message text
+    const hasErrors = messages.some((m) =>
+      messageParts(m).some(
+        (p) =>
+          (p.type === 'tool' && 'state' in p && p.state?.status === 'error') ||
+          (p.type === 'text' && /\b(?:error|exception|fail(?:ed|ure)?)\b/i.test(p.text ?? '')),
+      ),
+    );
+
+    const segments: string[] = [];
+
+    // Goals: first user msg + last user msg (captures scope drift)
+    if (userTexts.length > 0) {
+      const first = truncate(userTexts[0], perMsgBudget);
+      if (userTexts.length > 1) {
+        const last = truncate(userTexts[userTexts.length - 1], perMsgBudget);
+        segments.push(`Goals: ${first} → ${last}`);
+      } else {
+        segments.push(`Goals: ${first}`);
+      }
+    }
+
+    // Work: last 2 assistant messages
+    if (assistantTexts.length > 0) {
+      const recent = assistantTexts
+        .slice(-2)
+        .map((t) => truncate(t, perMsgBudget))
+        .join(' | ');
+      segments.push(`Work: ${recent}`);
+    }
+
+    // Files: up to 6 with total count
+    if (allFiles.length > 0) {
+      const shown = allFiles.slice(0, 6).join(', ');
+      segments.push(
+        allFiles.length > 6 ? `Files[${allFiles.length}]: ${shown}` : `Files: ${shown}`,
+      );
+    }
+
+    // Tools: up to 6 with total count
+    if (allTools.length > 0) {
+      const shown = allTools.slice(0, 6).join(', ');
+      segments.push(
+        allTools.length > 6 ? `Tools[${allTools.length}]: ${shown}` : `Tools: ${shown}`,
+      );
+    }
+
+    // Error flag
+    if (hasErrors) {
+      segments.push('⚠err');
+    }
+
+    // Message count stats
+    segments.push(`${messages.length}msg(u:${userTexts.length}/a:${assistantTexts.length})`);
+
+    if (segments.length === 0) return truncate(`Archived ${messages.length} messages`, limit);
+    return truncate(segments.join(' || '), limit);
+  }
+
   private listTools(messages: ConversationMessage[]): string[] {
     const tools: string[] = [];
     for (const message of messages) {
@@ -3405,7 +3574,9 @@ export class SqliteLcmStore {
   private buildArchivedSignature(messages: ConversationMessage[]): string {
     const hash = createHash('sha256');
     for (const message of messages) {
-      hash.update(String(signatureString(message.info?.id, 'unknown-message') ?? 'unknown-message'));
+      hash.update(
+        String(signatureString(message.info?.id, 'unknown-message') ?? 'unknown-message'),
+      );
       hash.update(String(signatureString(message.info?.role, 'unknown-role') ?? 'unknown-role'));
       hash.update(String(messageCreatedAt(message) ?? 0));
       hash.update(String(guessMessageText(message, this.options.interop.ignoreToolPrefixes) ?? ''));
@@ -3498,10 +3669,7 @@ export class SqliteLcmStore {
         if (node.messageIDs[index] !== expectedNodeMessageIDs[index]) return false;
       }
 
-      const expectedSummaryText = this.summarizeMessages(
-        archivedMessages.slice(node.startIndex, node.endIndex + 1),
-      );
-      if (node.summaryText !== expectedSummaryText) return false;
+      if (node.strategy !== this.options.summaryV2.strategy) return false;
 
       const children = this.readSummaryChildrenSync(node.nodeID);
       if (node.nodeKind === 'leaf') {
@@ -3567,6 +3735,7 @@ export class SqliteLcmStore {
       endIndex: input.endIndex,
       messageIDs: input.messageIDs,
       summaryText: input.summaryText,
+      strategy: this.options.summaryV2.strategy,
       createdAt: now,
     });
 
@@ -3624,14 +3793,15 @@ export class SqliteLcmStore {
     }
 
     const roots = currentLevel;
+    const leafNodes = nodes.filter((node) => node.nodeKind === 'leaf');
     const db = this.getDb();
     withTransaction(db, 'rebuildSummaryGraph', () => {
       this.clearSummaryGraphSync(sessionID);
 
       const insertNode = db.prepare(
         `INSERT INTO summary_nodes
-         (node_id, session_id, level, node_kind, start_index, end_index, message_ids_json, summary_text, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (node_id, session_id, level, node_kind, start_index, end_index, message_ids_json, summary_text, strategy, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const insertEdge = db.prepare(
         `INSERT INTO summary_edges (session_id, parent_id, child_id, child_position)
@@ -3651,6 +3821,7 @@ export class SqliteLcmStore {
           node.endIndex,
           JSON.stringify(node.messageIDs),
           node.summaryText,
+          node.strategy,
           node.createdAt,
         );
         insertSummaryFts.run(
@@ -3685,7 +3856,46 @@ export class SqliteLcmStore {
       );
     });
 
+    if (
+      this.options.summaryV2.strategy === 'llm-cli' &&
+      this.options.llmCli.enabled &&
+      this.options.llmCli.asyncEnhancement
+    ) {
+      void this.enhanceSummaryNodesAsync(sessionID, leafNodes, archivedMessages).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn('[opencode-lcm] Summary enhancement failed:', message);
+      });
+    }
+
     return roots;
+  }
+
+  private async enhanceSummaryNodesAsync(
+    sessionID: string,
+    leafNodes: SummaryNodeData[],
+    archivedMessages: ConversationMessage[],
+  ): Promise<void> {
+    if (this.summaryEnhancementLocks.has(sessionID)) return;
+
+    const run = (async () => {
+      try {
+        const updateNode = this.getDb().prepare(
+          'UPDATE summary_nodes SET summary_text = ? WHERE node_id = ?',
+        );
+        for (const node of leafNodes) {
+          const summaryText = await this.summarizeMessagesWithLLM(
+            archivedMessages.slice(node.startIndex, node.endIndex + 1),
+            SUMMARY_NODE_CHAR_LIMIT,
+          );
+          updateNode.run(summaryText, node.nodeID);
+        }
+      } finally {
+        this.summaryEnhancementLocks.delete(sessionID);
+      }
+    })();
+
+    this.summaryEnhancementLocks.set(sessionID, run);
+    await run;
   }
 
   private readSummaryNodeSync(nodeID: string): SummaryNodeData | undefined {
@@ -3705,6 +3915,7 @@ export class SqliteLcmStore {
       endIndex: row.end_index,
       messageIDs: parseJson<string[]>(row.message_ids_json),
       summaryText: row.summary_text,
+      strategy: row.strategy,
       createdAt: row.created_at,
     };
   }
@@ -4129,6 +4340,17 @@ export class SqliteLcmStore {
     if (names.has('archived_signature')) return;
 
     db.exec("ALTER TABLE summary_state ADD COLUMN archived_signature TEXT NOT NULL DEFAULT ''");
+  }
+
+  private ensureSummaryNodeColumnsSync(): void {
+    const db = this.getDb();
+    const columns = db.prepare('PRAGMA table_info(summary_nodes)').all() as Array<{ name: string }>;
+    const names = new Set(columns.map((column) => column.name));
+    if (names.has('strategy')) return;
+
+    db.exec(
+      "ALTER TABLE summary_nodes ADD COLUMN strategy TEXT NOT NULL DEFAULT 'deterministic-v1'",
+    );
   }
 
   private ensureArtifactColumnsSync(): void {
