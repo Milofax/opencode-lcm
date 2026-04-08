@@ -57,7 +57,7 @@ const DEFAULT_AUTOMATIC_RETRIEVAL: AutomaticRetrievalOptions = {
   },
 };
 
-const DEFAULT_SUMMARY_V2: SummaryV2Options = {
+export const DEFAULT_SUMMARY_V2: SummaryV2Options = {
   strategy: 'deterministic-v2',
   maxChars: 260,
   includeAllMessages: true,
@@ -74,7 +74,7 @@ const DEFAULT_SUMMARY_V2: SummaryV2Options = {
  *
  * Users override via opencode config: `llmCli: { enabled: true, command: 'llm', args: [...], ... }`
  */
-const DEFAULT_LLM_CLI: LlmCliOptions = {
+export const DEFAULT_LLM_CLI: LlmCliOptions = {
   enabled: false,
   command: 'opencode',
   args: ['run', '--pure', '--format', 'default', '-m', '{{MODEL}}'],
@@ -292,14 +292,19 @@ function asLlmCliOptions(value: unknown, fallback: LlmCliOptions): LlmCliOptions
   const record = asRecord(value);
   return {
     enabled: asBoolean(record?.enabled, fallback.enabled),
-    command: typeof record?.command === 'string' && record.command.length > 0
-      ? record.command
-      : fallback.command,
+    command:
+      typeof record?.command === 'string' && record.command.length > 0
+        ? record.command
+        : fallback.command,
     args: asStringArray(record?.args, fallback.args),
-    model: typeof record?.model === 'string' && record.model.length > 0
-      ? record.model
-      : fallback.model,
-    promptMode: record?.promptMode === 'stdin' ? 'stdin' : record?.promptMode === 'arg' ? 'arg' : fallback.promptMode,
+    model:
+      typeof record?.model === 'string' && record.model.length > 0 ? record.model : fallback.model,
+    promptMode:
+      record?.promptMode === 'stdin'
+        ? 'stdin'
+        : record?.promptMode === 'arg'
+          ? 'arg'
+          : fallback.promptMode,
     timeoutMs: asNonNegativeNumber(record?.timeoutMs, fallback.timeoutMs),
     maxPromptChars: asNonNegativeNumber(record?.maxPromptChars, fallback.maxPromptChars),
     fallbackOnError: asBoolean(record?.fallbackOnError, fallback.fallbackOnError),

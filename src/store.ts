@@ -23,6 +23,7 @@ import {
 import { type DoctorReport, type DoctorSessionIssue, formatDoctorReport } from './doctor.js';
 import { CLIExitError as CLIError, invokeCLI } from './invoke-cli.js';
 import { getLogger, isStartupLoggingEnabled } from './logging.js';
+import { DEFAULT_LLM_CLI, DEFAULT_SUMMARY_V2 } from './options.js';
 import {
   type CompiledPrivacyOptions,
   compilePrivacyOptions,
@@ -3374,7 +3375,6 @@ export class SqliteLcmStore {
       case 'llm-cli':
       case 'deterministic-v2':
         return this.summarizeMessagesDeterministicV2(messages, limit);
-      case 'deterministic-v1':
       default:
         return this.summarizeMessagesDeterministicV1(messages, limit);
     }
@@ -3385,7 +3385,8 @@ export class SqliteLcmStore {
     limit = SUMMARY_NODE_CHAR_LIMIT,
   ): Promise<string> {
     const fallback = (): string => this.summarizeMessagesDeterministicV2(messages, limit);
-    if (!this.options.llmCli.enabled) return fallback();
+    const llmCli = this.options.llmCli ?? DEFAULT_LLM_CLI;
+    if (!(llmCli.enabled ?? false)) return fallback();
 
     const separator = '\n---\n';
     const cleanSummaryText = (value: string): string =>
@@ -3410,9 +3411,9 @@ export class SqliteLcmStore {
       const entry = renderedMessages[index];
       const nextLength =
         chunkLength + entry.length + (selectedEntries.length > 0 ? separator.length : 0);
-      if (selectedEntries.length > 0 && nextLength > this.options.llmCli.maxPromptChars) continue;
-      if (selectedEntries.length === 0 && entry.length > this.options.llmCli.maxPromptChars) {
-        selectedEntries.unshift(truncate(entry, this.options.llmCli.maxPromptChars));
+      if (selectedEntries.length > 0 && nextLength > llmCli.maxPromptChars) continue;
+      if (selectedEntries.length === 0 && entry.length > llmCli.maxPromptChars) {
+        selectedEntries.unshift(truncate(entry, llmCli.maxPromptChars));
         chunkLength = selectedEntries[0]?.length ?? 0;
         break;
       }
@@ -3420,21 +3421,16 @@ export class SqliteLcmStore {
       chunkLength = nextLength;
     }
 
-    const chunkContent = truncate(
-      selectedEntries.join(separator),
-      this.options.llmCli.maxPromptChars,
-    );
+    const chunkContent = truncate(selectedEntries.join(separator), llmCli.maxPromptChars);
     const prompt = `Compress this conversation chunk into at most ${limit} characters. Focus on: decisions made, file paths touched, tools used, errors encountered, final outcomes. Output ONLY the compressed summary, no preamble, no explanation, no markdown.\n\nCHUNK:\n${chunkContent}`;
 
     try {
-      const args = this.options.llmCli.args.map((arg) =>
-        arg.replaceAll('{{MODEL}}', this.options.llmCli.model),
-      );
+      const args = llmCli.args.map((arg) => arg.replaceAll('{{MODEL}}', llmCli.model));
       const output = await invokeCLI({
-        command: this.options.llmCli.command,
-        args: this.options.llmCli.promptMode === 'arg' ? [...args, prompt] : args,
-        stdin: this.options.llmCli.promptMode === 'stdin' ? prompt : undefined,
-        timeoutMs: this.options.llmCli.timeoutMs,
+        command: llmCli.command,
+        args: llmCli.promptMode === 'arg' ? [...args, prompt] : args,
+        stdin: llmCli.promptMode === 'stdin' ? prompt : undefined,
+        timeoutMs: llmCli.timeoutMs,
         maxOutputChars: Math.max(limit * 2, limit),
       });
       const cleaned = cleanSummaryText(output);
@@ -3669,7 +3665,8 @@ export class SqliteLcmStore {
         if (node.messageIDs[index] !== expectedNodeMessageIDs[index]) return false;
       }
 
-      if (node.strategy !== this.options.summaryV2.strategy) return false;
+      if (node.strategy !== (this.options.summaryV2?.strategy ?? DEFAULT_SUMMARY_V2.strategy))
+        return false;
 
       const children = this.readSummaryChildrenSync(node.nodeID);
       if (node.nodeKind === 'leaf') {
@@ -3709,6 +3706,8 @@ export class SqliteLcmStore {
     archivedSignature: string,
   ): SummaryNodeData[] {
     const now = Date.now();
+    const summaryStrategy = this.options.summaryV2?.strategy ?? DEFAULT_SUMMARY_V2.strategy;
+    const llmCli = this.options.llmCli ?? DEFAULT_LLM_CLI;
     let level = 0;
     const nodes: SummaryNodeData[] = [];
     const edges: Array<{
@@ -3735,7 +3734,7 @@ export class SqliteLcmStore {
       endIndex: input.endIndex,
       messageIDs: input.messageIDs,
       summaryText: input.summaryText,
-      strategy: this.options.summaryV2.strategy,
+      strategy: summaryStrategy,
       createdAt: now,
     });
 
@@ -3857,9 +3856,9 @@ export class SqliteLcmStore {
     });
 
     if (
-      this.options.summaryV2.strategy === 'llm-cli' &&
-      this.options.llmCli.enabled &&
-      this.options.llmCli.asyncEnhancement
+      summaryStrategy === 'llm-cli' &&
+      (llmCli.enabled ?? false) &&
+      (llmCli.asyncEnhancement ?? false)
     ) {
       void this.enhanceSummaryNodesAsync(sessionID, leafNodes, archivedMessages).catch((error) => {
         const message = error instanceof Error ? error.message : String(error);

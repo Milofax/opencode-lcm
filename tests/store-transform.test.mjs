@@ -1611,7 +1611,7 @@ test('stale cached summary nodes are detected and rebuilt before reuse', async (
       timeout: 5000,
     });
     driftDb.exec(
-      "UPDATE summary_nodes SET summary_text = 'stale cached summary' WHERE session_id = 's1'",
+      "UPDATE summary_nodes SET summary_text = 'stale cached summary', strategy = 'deterministic-v1' WHERE session_id = 's1'",
     );
     driftDb.close();
     driftDb = undefined;
