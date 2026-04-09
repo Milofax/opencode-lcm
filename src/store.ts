@@ -3434,6 +3434,13 @@ export class SqliteLcmStore {
         maxOutputChars: Math.max(limit * 2, limit),
       });
       const cleaned = cleanSummaryText(output);
+      if (!cleaned || cleaned.includes('[LCM LLM FAILSAFE]')) {
+        console.warn(
+          '[opencode-lcm] LLM summarization fail-safe triggered, falling back:',
+          cleaned || 'empty output',
+        );
+        return fallback();
+      }
       return truncate(cleaned, limit);
     } catch (error) {
       const message =
