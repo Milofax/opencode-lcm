@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import { type Hooks, type PluginInput, tool } from '@opencode-ai/plugin';
 
+import { assertLocalBuildFreshnessSync } from './build-freshness.js';
 import { resolveOptions } from './options.js';
 import { SqliteLcmStore } from './store.js';
 import { resolveWorkspacePath } from './workspace-path.js';
@@ -108,6 +109,7 @@ function renderMapPrompt(template: string, item: unknown): string {
 }
 
 export const OpencodeLcmPlugin: PluginWithOptions = async (ctx, rawOptions) => {
+  assertLocalBuildFreshnessSync();
   const options = resolveOptions(rawOptions);
   const store = new SqliteLcmStore(ctx.directory, options);
 

@@ -47,6 +47,8 @@
     "test": "npm run build && tsc -p tests/tsconfig.json && node --test tests/*.test.mjs dist-tests/*.test.js",
     "perf:archive": "npm run build && node scripts/perf-archive.mjs",
     "dogfood:opencode": "npm run build && node scripts/dogfood-opencode.mjs",
+    "install:local": "node scripts/install-local.mjs",
+    "install:local:project": "node scripts/install-local.mjs --target project",
     "prepublishOnly": "npm run typecheck && npm run lint && npm run test"
   },
   "peerDependencies": {

@@ -7,8 +7,8 @@ import { DEFAULT_OPTIONS, resolveOptions } from '../dist/options.js';
 import {
   captureMessage,
   conversationMessage,
-  makeOptions,
   makeMockClient,
+  makeOptions,
   makePluginContext,
   makeToolContext,
   makeWorkspace,

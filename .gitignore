@@ -12,3 +12,4 @@ Thumbs.db
 .tmp-bench-*/
 .lcm-export-*/
 *.png
+entities.json
