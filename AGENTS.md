@@ -89,7 +89,8 @@ When you push `local/main`, GitHub prints a `Create a pull request for 'local/ma
 3. `git checkout local/main && git rebase master` — resolve conflicts in favor of the local fix unless the upstream change obviously supersedes it.
 4. `npm run typecheck && npm run lint && npm test` — all three must be green.
 5. `npm run build && npm run install:local` — rebuilds `dist/` and refreshes the symlink in `~/.config/opencode/plugins/`.
-6. Restart OpenCode.
+6. **Smoke-test the built plugin before restarting OpenCode** (see `Smoke-test` row in the Build & install table). This actively calls the plugin factory, which in turn runs `assertLocalBuildFreshnessSync()` — if the schema guard is going to fire, it fires here in the terminal instead of silently killing the OpenCode session on next launch. See `## Schema version guard` for recovery.
+7. Restart OpenCode.
 
 Never merge `local/main` into `master`. Pushing `local/main` to `origin` is fine — it exists as a backup mirror — but never open a PR from it (see the PR-link trap above).
 
@@ -103,6 +104,7 @@ Never merge `local/main` into `master`. Pushing `local/main` to `origin` is fine
 | Lint | `npm run lint` | Biome. Two pre-existing `noExplicitAny` warnings in `src/index.ts` are expected; new errors are not. |
 | Test | `npm test` | Builds `dist/` and `dist-tests/`, then runs node:test. Current baseline: **181 tests, 0 failures**. |
 | Build | `npm run build` | `tsc -p tsconfig.json` → writes `dist/`. Required before install. |
+| Smoke-test | `node --input-type=module -e "import p from './dist/index.js'; const h = await p({directory:'/tmp/lcm-smoke-'+Date.now(),client:{},app:{}},{}); console.log('OK tools='+Object.keys(h.tool).length)"` | Runs the plugin factory end-to-end against a throwaway temp dir. Triggers `assertLocalBuildFreshnessSync()` — see `## Schema version guard`. Expected output: `OK tools=19`. Any `Stale local opencode-lcm build detected` error means you skipped `npm run build` or the source schema jumped past the built one. |
 | Install global | `npm run install:local` | Builds + symlinks `dist/index.js` → `~/.config/opencode/plugins/opencode-lcm.js`. |
 | Install project | `npm run install:local:project` | Same, but targets `.opencode/plugins/` in CWD. |
 | Install copy (no symlink) | `node scripts/install-local.mjs --copy` | Hard-copies instead of symlinking. Use only when the plugin dir is on a filesystem that blocks symlinks. |
