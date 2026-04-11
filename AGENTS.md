@@ -56,3 +56,61 @@ Search results can flood context. Use `context-mode_ctx_execute(language: "shell
 | `ctx stats` | Call the `stats` MCP tool and display the full output verbatim |
 | `ctx doctor` | Call the `doctor` MCP tool, run the returned shell command, display as checklist |
 | `ctx upgrade` | Call the `upgrade` MCP tool, run the returned shell command, display as checklist |
+
+---
+
+# Branch layout & local build
+
+This repo tracks upstream `Plutarch01/opencode-lcm` but ships a **local fork** that must survive upstream rewrites. Read this before touching branches.
+
+## Branches
+
+| Branch | Purpose | Rule |
+|---|---|---|
+| `master` | Mirrors local baseline built from upstream + cherry-picked fixes. `origin/master` is the local remote. | Only fast-forward merges from upstream. Never rebase. |
+| `upstream/master` | Read-only pointer at `Plutarch01/opencode-lcm:master`. | Never push. Use `git fetch upstream` only. |
+| `local/main` | **The branch that actually runs on this machine.** Carries local-only fixes that are not (yet) upstream. | Always ahead of `master`. Never force-pushed. Never deleted. |
+| `fix/*`, `feat/*` | Historical feature branches from earlier work. | Already folded into `master` or `local/main`. Treat as archive — do not re-merge blindly. |
+
+`local/main` is the single integration branch. Every locally-built `dist/index.js` that OpenCode loads comes from it.
+
+## Upgrading from upstream
+
+1. `git fetch upstream`
+2. `git checkout master && git merge --ff-only upstream/master` — hard fail if upstream rewrote history; investigate before `--force`.
+3. `git checkout local/main && git rebase master` — resolve conflicts in favor of the local fix unless the upstream change obviously supersedes it.
+4. `npm run typecheck && npm run lint && npm test` — all three must be green.
+5. `npm run build && npm run install:local` — rebuilds `dist/` and refreshes the symlink in `~/.config/opencode/plugins/`.
+6. Restart OpenCode.
+
+Never merge `local/main` into `master`. Never push `local/main` to `origin` unless you are creating a backup remote branch for another machine.
+
+## Build & install
+
+| Task | Command | Notes |
+|---|---|---|
+| Typecheck | `npm run typecheck` | `tsc --noEmit` — must be clean before commit. |
+| Lint | `npm run lint` | Biome. Two pre-existing `noExplicitAny` warnings in `src/index.ts` are expected; new errors are not. |
+| Test | `npm test` | Builds `dist/` and `dist-tests/`, then runs node:test. Current baseline: **181 tests, 0 failures**. |
+| Build | `npm run build` | `tsc -p tsconfig.json` → writes `dist/`. Required before install. |
+| Install global | `npm run install:local` | Builds + symlinks `dist/index.js` → `~/.config/opencode/plugins/opencode-lcm.js`. |
+| Install project | `npm run install:local:project` | Same, but targets `.opencode/plugins/` in CWD. |
+| Install copy (no symlink) | `node scripts/install-local.mjs --copy` | Hard-copies instead of symlinking. Use only when the plugin dir is on a filesystem that blocks symlinks. |
+| Skip rebuild | `node scripts/install-local.mjs --skip-build` | Reuses existing `dist/`. Use for fast iteration when the build is already fresh. |
+
+The `file:///…/dist/index.js` entry in `~/.config/opencode/opencode.json` is what makes OpenCode load the local build **instead** of the npm package. That entry is the load-bearing part — if it is removed, OpenCode will silently auto-download the upstream npm version and the local fixes will vanish. Check it after any OpenCode config edit.
+
+## Schema version guard
+
+`src/build-freshness.ts` is wired into plugin init via `assertLocalBuildFreshnessSync()`. At load time it reads `src/constants.ts` and compares `STORE_SCHEMA_VERSION` against the value baked into `dist/constants.js`. If source is ahead of runtime, the plugin throws at startup with `Stale local opencode-lcm build detected: …`.
+
+When you see that error: run `npm run build && npm run install:local` and restart. Do not bypass the guard — a mismatch means the SQLite store on disk may be about to get a migration that the running code cannot handle.
+
+The guard is silent when running from the published npm package (no `src/constants.ts` next to `dist/`). It only activates for from-source installs, which is exactly this repo.
+
+## Git hygiene
+
+- `entities.json` is a Graphiti test artifact. It is gitignored — do not commit it.
+- `.lcm/`, `.opencode/`, `dist/`, `dist-tests/` are gitignored. Never force-add them.
+- Commit message style: `<type>(<scope>): <subject>` matching the existing log. Local-only commits should use scope `(local)` so they are easy to spot when rebasing onto upstream.
+- Before committing, confirm no unresolved conflict markers are left in `src/store.ts` — that file has a history of surviving broken merges. `grep -n '<<<<<<< \|=======$\|>>>>>>> '` should return nothing.
