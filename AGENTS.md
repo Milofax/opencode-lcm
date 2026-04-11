@@ -95,6 +95,8 @@ Never merge `local/main` into `master`. Pushing `local/main` to `origin` is fine
 
 ## Build & install
 
+**Prerequisites**: Node **≥ 22** (`package.json` `engines.node`). The test suite relies on `node:sqlite`, which is stable from Node 22 onward — older runtimes will fail `npm test` before any test logic runs. Run `node --version` once after `nvm use` / `fnm use` to confirm. `npm install` pulls in TypeScript 5.8 and Biome 2.4 as devDependencies; no global installs needed.
+
 | Task | Command | Notes |
 |---|---|---|
 | Typecheck | `npm run typecheck` | `tsc --noEmit` — must be clean before commit. |
