@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
 
 import type { Event, Message, Part } from '@opencode-ai/sdk';
@@ -970,12 +970,40 @@ export class SqliteLcmStore {
     const db = await openSqliteDatabase(this.dbPath);
     this.db = db;
 
-    try {
-      logStartupPhase('open-db:schema-check');
+try {
+logStartupPhase('open-db:schema-check');
       this.assertSupportedSchemaVersionSync();
-      db.exec('PRAGMA journal_mode = WAL');
+
+      // Configure SQLite for maximum resilience against I/O errors
+      logStartupPhase('open-db:configure-sqlite');
+
+      // Set busy timeout to handle concurrent access gracefully
+      db.exec('PRAGMA busy_timeout = 5000');
+
+      // Attempt WAL mode with recovery
+      try {
+db.exec('PRAGMA journal_mode = WAL');
       db.exec('PRAGMA synchronous = NORMAL');
-      logStartupPhase('open-db:create-tables');
+
+        // Perform a WAL checkpoint to ensure database consistency
+        db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      } catch (walError) {
+        getLogger().warn('WAL mode setup failed, attempting recovery', {
+          error: walError instanceof Error ? walError.message : String(walError),
+        });
+
+        // If WAL mode fails, try to recover by deleting WAL files and retrying
+        await this.attemptWalRecovery();
+
+        // Retry WAL mode after recovery attempt
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA synchronous = NORMAL');
+      }
+
+      // Additional resilience settings
+      db.exec('PRAGMA temp_store = MEMORY');
+      db.exec('PRAGMA mmap_size = 268435456'); // 256MB mmap for better performance
+logStartupPhase('open-db:create-tables');
       db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
@@ -1240,8 +1268,53 @@ export class SqliteLcmStore {
       logStartupPhase('deferred-init:lineage-refresh');
       this.refreshAllLineageSync();
     }
-    logStartupPhase('deferred-init:done');
     this.deferredInitCompleted = true;
+  }
+
+  private async attemptWalRecovery(): Promise<void> {
+    // Attempt to recover from corrupted WAL files by closing the database
+    // and deleting WAL-related files before reopening
+    logStartupPhase('wal-recovery:start');
+
+    try {
+      // Close the database if open
+      if (this.db) {
+        try {
+          this.db.close();
+        } catch {
+          // Ignore close errors during recovery
+        }
+        this.db = undefined;
+      }
+
+      // List of WAL-related files to potentially clean up
+      const walFiles = [
+        `${this.dbPath}-wal`,
+        `${this.dbPath}-shm`,
+      ];
+
+      for (const walFile of walFiles) {
+        try {
+          await unlink(walFile);
+          getLogger().info('WAL recovery: removed stale WAL file', { file: walFile });
+        } catch (error) {
+          // File may not exist, which is fine
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+            getLogger().warn('WAL recovery: failed to remove WAL file', {
+              file: walFile,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+      }
+
+      logStartupPhase('wal-recovery:done');
+    } catch (error) {
+      getLogger().error('WAL recovery failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
   }
 
   private hasPendingArtifactBlobBackfillSync(): boolean {
@@ -5270,17 +5343,66 @@ export class SqliteLcmStore {
     );
   }
 
-  private writeEvent(event: CapturedEvent): void {
-    const payloadStub =
-      event.type.startsWith('message.') || event.type.startsWith('session.')
-        ? `[${event.type}]`
+private writeEvent(event: CapturedEvent): void {
+const payloadStub =
+event.type.startsWith('message.') || event.type.startsWith('session.')
+? `[${event.type}]`
         : '';
-    this.getDb()
-      .prepare(
-        `INSERT OR IGNORE INTO events (id, session_id, event_type, ts, payload_json)
-         VALUES (?, ?, ?, ?, ?)`,
-      )
+
+    // Retry logic for transient SQLite I/O errors (e.g., SQLITE_IOERR_VNODE on macOS)
+    const maxRetries = 3;
+    const baseDelayMs = 10;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+this.getDb()
+.prepare(
+`INSERT OR IGNORE INTO events (id, session_id, event_type, ts, payload_json)
+VALUES (?, ?, ?, ?, ?)`,
+)
       .run(event.id, event.sessionID ?? null, event.type, event.timestamp, payloadStub);
+        return;
+  } catch (error) {
+        const isIoError = this.isSqliteIoError(error);
+        const isLastAttempt = attempt === maxRetries - 1;
+
+        if (!isIoError || isLastAttempt) {
+          throw error;
+        }
+
+        // Exponential backoff with jitter
+        const delayMs = baseDelayMs * Math.pow(2, attempt) + Math.random() * 10;
+        getLogger().debug('SQLite I/O error in writeEvent, retrying', {
+          attempt: attempt + 1,
+          maxRetries,
+          delayMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+
+        // Use a synchronous sleep for the retry delay
+        this.sleepSync(delayMs);
+      }
+    }
+  }
+
+  private isSqliteIoError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const message = error.message;
+    const code = (error as { code?: string }).code;
+
+    // Check for SQLite I/O error codes
+    if (code?.startsWith('SQLITE_IOERR')) return true;
+    if (message.includes('SQLITE_IOERR')) return true;
+    if (message.includes('disk I/O error')) return true;
+
+    return false;
+  }
+
+  private sleepSync(ms: number): void {
+    // Synchronous sleep using Atomics.wait for Bun/Node compatibility
+    const buffer = new SharedArrayBuffer(4);
+    const view = new Int32Array(buffer);
+    Atomics.wait(view, 0, 0, Math.max(1, Math.floor(ms)));
   }
 
   private clearSummaryGraphSync(sessionID: string): void {
