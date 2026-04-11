@@ -83,6 +83,7 @@ import {
   hashContent,
   isAutomaticRetrievalNoise,
   parseJson,
+  parseJsonSafe,
   sanitizeAutomaticRetrievalSourceText,
   shortNodeID,
   shouldSuppressLowSignalAutomaticRetrievalAnchor,
@@ -4948,7 +4949,17 @@ logStartupPhase('open-db:create-tables');
         partsByMessage = new Map();
         partsBySessionMessage.set(partRow.session_id, partsByMessage);
       }
-      const part = parseJson<Part>(partRow.part_json);
+      const part = parseJsonSafe<Part>(partRow.part_json, (error, preview) => {
+        getLogger().warn('Skipping corrupted part row', {
+          operation: 'readSessionsBatchSync',
+          sessionID: partRow.session_id,
+          messageID: partRow.message_id,
+          partID: partRow.part_id,
+          error: error.message,
+          preview,
+        });
+      });
+      if (!part) continue;
       const artifacts = artifactsByPart.get(part.id) ?? [];
       hydratePartFromArtifacts(part, artifacts);
       const parts = partsByMessage.get(partRow.message_id) ?? [];
@@ -4960,9 +4971,19 @@ logStartupPhase('open-db:create-tables');
     const messagesBySession = new Map<string, Array<{ info: Message; parts: Part[] }>>();
     for (const messageRow of messageRows) {
       const sessionParts = partsBySessionMessage.get(messageRow.session_id);
+      const info = parseJsonSafe<Message>(messageRow.info_json, (error, preview) => {
+        getLogger().warn('Skipping corrupted message row', {
+          operation: 'readSessionsBatchSync',
+          sessionID: messageRow.session_id,
+          messageID: messageRow.message_id,
+          error: error.message,
+          preview,
+        });
+      });
+      if (!info) continue;
       const messages = messagesBySession.get(messageRow.session_id) ?? [];
       messages.push({
-        info: parseJson<Message>(messageRow.info_json),
+        info,
         parts: sessionParts?.get(messageRow.message_id) ?? [],
       });
       messagesBySession.set(messageRow.session_id, messages);
@@ -5009,7 +5030,17 @@ logStartupPhase('open-db:create-tables');
     const partsByMessage = new Map<string, Part[]>();
     for (const partRow of partRows) {
       const parts = partsByMessage.get(partRow.message_id) ?? [];
-      const part = parseJson<Part>(partRow.part_json);
+      const part = parseJsonSafe<Part>(partRow.part_json, (error, preview) => {
+        getLogger().warn('Skipping corrupted part row', {
+          operation: 'readSessionSync',
+          sessionID: partRow.session_id,
+          messageID: partRow.message_id,
+          partID: partRow.part_id,
+          error: error.message,
+          preview,
+        });
+      });
+      if (!part) continue;
       const artifacts = artifactsByPart.get(part.id) ?? [];
       hydratePartFromArtifacts(part, artifacts);
       parts.push(part);
@@ -5017,10 +5048,24 @@ logStartupPhase('open-db:create-tables');
     }
 
     const messages = filterValidConversationMessages(
-      messageRows.map((messageRow) => ({
-        info: parseJson<Message>(messageRow.info_json),
-        parts: partsByMessage.get(messageRow.message_id) ?? [],
-      })),
+      messageRows
+        .map((messageRow) => {
+          const info = parseJsonSafe<Message>(messageRow.info_json, (error, preview) => {
+            getLogger().warn('Skipping corrupted message row', {
+              operation: 'readSessionSync',
+              sessionID,
+              messageID: messageRow.message_id,
+              error: error.message,
+              preview,
+            });
+          });
+          if (!info) return undefined;
+          return {
+            info,
+            parts: partsByMessage.get(messageRow.message_id) ?? [],
+          };
+        })
+        .filter((entry): entry is { info: Message; parts: Part[] } => entry !== undefined),
       { operation: 'readSessionSync', sessionID },
     );
 
@@ -5125,25 +5170,45 @@ logStartupPhase('open-db:create-tables');
       )
       .all(sessionID, messageID) as PartRow[];
 
-    const info = parseJson<Message>(row.info_json);
-    if (!getValidMessageInfo(info)) {
-      logMalformedMessage(
-        'Skipping malformed stored message',
-        {
-          operation: 'readMessageSync',
-          sessionID,
-        },
-        { messageID },
-      );
+    const info = parseJsonSafe<Message>(row.info_json, (error, preview) => {
+      getLogger().warn('Skipping corrupted message row', {
+        operation: 'readMessageSync',
+        sessionID,
+        messageID,
+        error: error.message,
+        preview,
+      });
+    });
+    if (!info || !getValidMessageInfo(info)) {
+      if (info) {
+        logMalformedMessage(
+          'Skipping malformed stored message',
+          {
+            operation: 'readMessageSync',
+            sessionID,
+          },
+          { messageID },
+        );
+      }
       return undefined;
     }
 
     return {
       info,
-      parts: parts.map((partRow) => {
-        const part = parseJson<Part>(partRow.part_json);
+      parts: parts.flatMap((partRow) => {
+        const part = parseJsonSafe<Part>(partRow.part_json, (error, preview) => {
+          getLogger().warn('Skipping corrupted part row', {
+            operation: 'readMessageSync',
+            sessionID,
+            messageID,
+            partID: partRow.part_id,
+            error: error.message,
+            preview,
+          });
+        });
+        if (!part) return [];
         if (hydrateArtifacts) hydratePartFromArtifacts(part, artifactsByPart.get(part.id) ?? []);
-        return part;
+        return [part];
       }),
     };
   }
