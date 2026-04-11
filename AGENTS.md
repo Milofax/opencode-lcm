@@ -70,9 +70,17 @@ This repo tracks upstream `Plutarch01/opencode-lcm` but ships a **local fork** t
 | `master` | Mirrors local baseline built from upstream + cherry-picked fixes. `origin/master` is the local remote. | Only fast-forward merges from upstream. Never rebase. |
 | `upstream/master` | Read-only pointer at `Plutarch01/opencode-lcm:master`. | Never push. Use `git fetch upstream` only. |
 | `local/main` | **The branch that actually runs on this machine.** Carries local-only fixes that are not (yet) upstream. | Always ahead of `master`. Never force-pushed. Never deleted. |
+| `origin/local/main` | Backup mirror of `local/main` on `Milofax/opencode-lcm`. | Push-only mirror. Never open a PR from it (see below). |
 | `fix/*`, `feat/*` | Historical feature branches from earlier work. | Already folded into `master` or `local/main`. Treat as archive — do not re-merge blindly. |
 
-`local/main` is the single integration branch. Every locally-built `dist/index.js` that OpenCode loads comes from it.
+`local/main` is the single integration branch. Every locally-built `dist/index.js` that OpenCode loads comes from it. The branch is mirrored to `origin/local/main` as an off-machine backup — nothing more.
+
+### The GitHub PR-link trap
+
+When you push `local/main`, GitHub prints a `Create a pull request for 'local/main'` URL. **Ignore it.** It is an auto-generated suggestion that appears on every new-branch push; it is not an invitation. Opening a PR from `local/main → master` (on either `origin` or `upstream`) would collapse the whole separation that this branch layout exists to protect:
+
+- PR to `Milofax:master`: pollutes master with local-only commits (install scripts, `entities.json` gitignore, etc.) and the next `git fetch upstream && merge --ff-only` breaks with a non-FF error.
+- PR to `Plutarch01:master`: ships host-specific artifacts to the upstream project. If you actually want to contribute a fix upstream, build a **clean feature branch from `master`** with just the relevant commits cherry-picked, and open the PR from there — not from `local/main`.
 
 ## Upgrading from upstream
 
@@ -83,7 +91,7 @@ This repo tracks upstream `Plutarch01/opencode-lcm` but ships a **local fork** t
 5. `npm run build && npm run install:local` — rebuilds `dist/` and refreshes the symlink in `~/.config/opencode/plugins/`.
 6. Restart OpenCode.
 
-Never merge `local/main` into `master`. Never push `local/main` to `origin` unless you are creating a backup remote branch for another machine.
+Never merge `local/main` into `master`. Pushing `local/main` to `origin` is fine — it exists as a backup mirror — but never open a PR from it (see the PR-link trap above).
 
 ## Build & install
 
@@ -107,6 +115,16 @@ The `file:///…/dist/index.js` entry in `~/.config/opencode/opencode.json` is w
 When you see that error: run `npm run build && npm run install:local` and restart. Do not bypass the guard — a mismatch means the SQLite store on disk may be about to get a migration that the running code cannot handle.
 
 The guard is silent when running from the published npm package (no `src/constants.ts` next to `dist/`). It only activates for from-source installs, which is exactly this repo.
+
+## Contributing upstream (rare)
+
+If a fix on `local/main` genuinely belongs upstream:
+
+1. `git checkout -b fix/<topic> master` — clean base, no local-install artifacts.
+2. `git cherry-pick` the relevant commits from `local/main`. Skip anything that references `scripts/install-local.mjs`, `.gitignore` entries like `entities.json`, or anything scoped `(local)`.
+3. `npm run typecheck && npm run lint && npm test` on the clean branch.
+4. `git push origin fix/<topic>` and open the PR against `Plutarch01:master` from **that** branch, not from `local/main`.
+5. When the PR merges upstream, drop the cherry-pick duplicate from `local/main` during the next rebase so the same change does not live in two places.
 
 ## Git hygiene
 
