@@ -985,8 +985,8 @@ export class SqliteLcmStore {
     const db = await openSqliteDatabase(this.dbPath);
     this.db = db;
 
-try {
-logStartupPhase('open-db:schema-check');
+    try {
+      logStartupPhase('open-db:schema-check');
       this.assertSupportedSchemaVersionSync();
 
       // Configure SQLite for maximum resilience against I/O errors
@@ -997,8 +997,8 @@ logStartupPhase('open-db:schema-check');
 
       // Attempt WAL mode with recovery
       try {
-db.exec('PRAGMA journal_mode = WAL');
-      db.exec('PRAGMA synchronous = NORMAL');
+        db.exec('PRAGMA journal_mode = WAL');
+        db.exec('PRAGMA synchronous = NORMAL');
 
         // Perform a WAL checkpoint to ensure database consistency
         db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
@@ -1018,7 +1018,7 @@ db.exec('PRAGMA journal_mode = WAL');
       // Additional resilience settings
       db.exec('PRAGMA temp_store = MEMORY');
       db.exec('PRAGMA mmap_size = 268435456'); // 256MB mmap for better performance
-logStartupPhase('open-db:create-tables');
+      logStartupPhase('open-db:create-tables');
       db.exec(`
       CREATE TABLE IF NOT EXISTS events (
         id TEXT PRIMARY KEY,
@@ -1303,10 +1303,7 @@ logStartupPhase('open-db:create-tables');
       }
 
       // List of WAL-related files to potentially clean up
-      const walFiles = [
-        `${this.dbPath}-wal`,
-        `${this.dbPath}-shm`,
-      ];
+      const walFiles = [`${this.dbPath}-wal`, `${this.dbPath}-shm`];
 
       for (const walFile of walFiles) {
         try {
@@ -5464,10 +5461,10 @@ logStartupPhase('open-db:create-tables');
     );
   }
 
-private writeEvent(event: CapturedEvent): void {
-const payloadStub =
-event.type.startsWith('message.') || event.type.startsWith('session.')
-? `[${event.type}]`
+  private writeEvent(event: CapturedEvent): void {
+    const payloadStub =
+      event.type.startsWith('message.') || event.type.startsWith('session.')
+        ? `[${event.type}]`
         : '';
 
     // Retry logic for transient SQLite I/O errors (e.g., SQLITE_IOERR_VNODE on macOS)
@@ -5476,14 +5473,14 @@ event.type.startsWith('message.') || event.type.startsWith('session.')
 
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       try {
-this.getDb()
-.prepare(
-`INSERT OR IGNORE INTO events (id, session_id, event_type, ts, payload_json)
+        this.getDb()
+          .prepare(
+            `INSERT OR IGNORE INTO events (id, session_id, event_type, ts, payload_json)
 VALUES (?, ?, ?, ?, ?)`,
-)
-      .run(event.id, event.sessionID ?? null, event.type, event.timestamp, payloadStub);
+          )
+          .run(event.id, event.sessionID ?? null, event.type, event.timestamp, payloadStub);
         return;
-  } catch (error) {
+      } catch (error) {
         const isIoError = this.isSqliteIoError(error);
         const isLastAttempt = attempt === maxRetries - 1;
 
@@ -5492,7 +5489,7 @@ VALUES (?, ?, ?, ?, ?)`,
         }
 
         // Exponential backoff with jitter
-        const delayMs = baseDelayMs * Math.pow(2, attempt) + Math.random() * 10;
+        const delayMs = baseDelayMs * 2 ** attempt + Math.random() * 10;
         getLogger().debug('SQLite I/O error in writeEvent, retrying', {
           attempt: attempt + 1,
           maxRetries,
