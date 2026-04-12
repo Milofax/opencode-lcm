@@ -1800,7 +1800,15 @@ logStartupPhase('open-db:create-tables');
 
     const latestMessageCreated = messageCreatedAt(archived.at(-1));
     const archivedSignature = this.buildArchivedSignature(archived);
-    const rootIDs = state ? parseJson<string[]>(state.root_node_ids_json) : [];
+    const rootIDs = state
+      ? (parseJsonSafe<string[]>(state.root_node_ids_json, (error) => {
+          getLogger().warn('Corrupted root_node_ids_json in summary_state', {
+            operation: 'diagnoseSummarySession',
+            sessionID: session.sessionID,
+            error: error.message,
+          });
+        }) ?? [])
+      : [];
     const roots = rootIDs
       .map((nodeID) => this.readSummaryNodeSync(nodeID))
       .filter((node): node is SummaryNodeData => Boolean(node));
@@ -3842,7 +3850,14 @@ logStartupPhase('open-db:create-tables');
       state.latest_message_created === latestMessageCreated &&
       state.archived_signature === archivedSignature
     ) {
-      const rootIDs = parseJson<string[]>(state.root_node_ids_json);
+      const rootIDs =
+        parseJsonSafe<string[]>(state.root_node_ids_json, (error) => {
+          getLogger().warn('Corrupted root_node_ids_json in summary_state', {
+            operation: 'ensureSummaryGraphSync',
+            sessionID,
+            error: error.message,
+          });
+        }) ?? [];
       const roots = rootIDs
         .map((nodeID) => this.readSummaryNodeSync(nodeID))
         .filter((node): node is SummaryNodeData => Boolean(node));
@@ -4097,7 +4112,15 @@ logStartupPhase('open-db:create-tables');
       nodeKind: row.node_kind === 'leaf' ? 'leaf' : 'internal',
       startIndex: row.start_index,
       endIndex: row.end_index,
-      messageIDs: parseJson<string[]>(row.message_ids_json),
+      messageIDs:
+        parseJsonSafe<string[]>(row.message_ids_json, (error) => {
+          getLogger().warn('Corrupted message_ids_json in summary_nodes', {
+            operation: 'readSummaryNodeSync',
+            nodeID: row.node_id,
+            sessionID: row.session_id,
+            error: error.message,
+          });
+        }) ?? [],
       summaryText: row.summary_text,
       strategy: row.strategy,
       createdAt: row.created_at,
@@ -4933,7 +4956,7 @@ logStartupPhase('open-db:create-tables');
         contentHash: contentHash ?? hashContent(contentText),
         charCount: blob?.char_count ?? row.char_count,
         createdAt: row.created_at,
-        metadata: parseJson<Record<string, unknown>>(row.metadata_json || '{}'),
+        metadata: parseJsonSafe<Record<string, unknown>>(row.metadata_json || '{}') ?? {},
       };
       const list = artifactsByPart.get(artifact.partID) ?? [];
       list.push(artifact);
@@ -5531,9 +5554,18 @@ VALUES (?, ?, ?, ?, ?)`,
     try {
       const entries = await readdir(sessionsDir);
       for (const entry of entries.filter((item) => item.endsWith('.json'))) {
-        const content = await readFile(path.join(sessionsDir, entry), 'utf8');
-        const session = parseJson<NormalizedSession>(content);
-        await this.persistSession(session);
+        try {
+          const content = await readFile(path.join(sessionsDir, entry), 'utf8');
+          const session = parseJsonSafe<NormalizedSession>(content, (error) => {
+            getLogger().debug('Corrupted legacy session file skipped', {
+              entry,
+              error: error.message,
+            });
+          });
+          if (session) await this.persistSession(session);
+        } catch (error) {
+          getLogger().debug('Legacy session file migration failed', { entry, error });
+        }
       }
     } catch (error) {
       if (!hasErrorCode(error, 'ENOENT')) {
@@ -5544,15 +5576,19 @@ VALUES (?, ?, ?, ?, ?)`,
     const resumePath = path.join(this.baseDir, 'resume.json');
     try {
       const content = await readFile(resumePath, 'utf8');
-      const resumes = parseJson<ResumeMap>(content);
-      const insertResume = db.prepare(
-        `INSERT INTO resumes (session_id, note, updated_at)
-         VALUES (?, ?, ?)
-         ON CONFLICT(session_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
-      );
-      const now = Date.now();
-      for (const [sessionID, note] of Object.entries(resumes)) {
-        insertResume.run(sessionID, note, now);
+      const resumes = parseJsonSafe<ResumeMap>(content, (error) => {
+        getLogger().debug('Corrupted legacy resume.json skipped', { error: error.message });
+      });
+      if (resumes) {
+        const insertResume = db.prepare(
+          `INSERT INTO resumes (session_id, note, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(session_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
+        );
+        const now = Date.now();
+        for (const [sessionID, note] of Object.entries(resumes)) {
+          insertResume.run(sessionID, note, now);
+        }
       }
     } catch (error) {
       if (!hasErrorCode(error, 'ENOENT')) {
